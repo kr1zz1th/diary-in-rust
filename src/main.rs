@@ -3,6 +3,9 @@ use std::path::Path;
 use aes_gcm::aead::{Aead, Generate, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::Argon2;
+use std::os::unix::fs::OpenOptionsExt;
+use std::io::Write;
+use std::process::Command;
 
 fn derive_key(password: &str, salt: &[u8]) -> [u8; 32] {
     let mut key = [0u8; 32];
@@ -35,9 +38,7 @@ fn decrypt(password: &str, encrypted_stuff: &[u8]) -> Vec<u8> {
     let key = derive_key(password, salt);
     let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
     
-    let ct = cipher.decrypt(&n, &encrypted_stuff[28..]).expect("wrong password");
-
-    ct
+    cipher.decrypt(&n, &encrypted_stuff[28..]).expect("wrong password")
 }
 
 fn main() {
@@ -62,5 +63,42 @@ fn main() {
     let password = rpassword::prompt_password("Enter password: ").unwrap();
     let decrypted_data = decrypt(&password, &data);
 
-    println!("{:?}", decrypted_data);
+    // Write into /tmp
+
+    let mut tmp_num = [0u8; 8];
+    getrandom::fill(&mut tmp_num).unwrap();
+    let tmp_num1 = u64::from_le_bytes(tmp_num);
+    
+    let tmp_string = format!("/tmp/diary-{:016x}.txt", tmp_num1);
+    let tmp_path = Path::new(&tmp_string);
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp_path)
+        .unwrap();
+
+    file.write_all(&decrypted_data).unwrap();
+    drop(file);
+
+    let status = Command::new("nvim")
+        .args(["-n", "-i", "NONE", "-c", "set noundofile nobackup nowritebackup"])
+        .arg(tmp_path)
+        .status()
+        .unwrap();
+
+
+    let edited = fs::read(tmp_path).unwrap();
+    fs::write(tmp_path, vec![0u8; edited.len()]).unwrap();
+    fs::remove_file(tmp_path).unwrap();
+
+    if !status.success() {
+        println!("nvim crashed, all changes are discarded");
+        return;
+    }
+
+    fs::write("diary.enc", encrypt(&password, &edited)).unwrap();
+
+    println!("Saved diary");
 }
